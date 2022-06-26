@@ -56,7 +56,7 @@ def getRawDataResults(html_path_list: list):
             df["jockey_id"] = jockey_id_list
             
             #インデックスをrace_idにする
-            race_id = re.findall('\d', html_path)[0]
+            race_id = re.findall('(?<=race/)\d+', html_path)[0]
             df.index = [race_id] * len(df)
 
             race_results[race_id] = df
@@ -96,7 +96,7 @@ def getRawDataInfo(html_path_list: list):
                 df["date"] = [text] 
             
         #インデックスをrace_idにする
-        race_id = re.findall('\d + ', html_path)[0]
+        race_id = re.findall('(?<=race/)\d+', html_path)[0]
         df.index = [race_id] * len(df)
 
         race_infos[race_id] = df
@@ -104,7 +104,7 @@ def getRawDataInfo(html_path_list: list):
         race_infos_df = pd.concat([race_infos[key] for key in race_infos])
     return race_infos_df
 
-def getRaw_DataReturn(html_path_list:list):
+def getRawDataReturn(html_path_list:list):
     """
     raceページのhtmlを受け取って、払い戻しテーブルに変換する関数
     """
@@ -127,5 +127,84 @@ def getRaw_DataReturn(html_path_list:list):
         return_tables_df = pd.concat([return_tables[key] for key in return_tables])
     return return_tables_df
 
+def getHTMLHorse(horse_id_list: list,slip: bool = True):
+    """
+    netkeiba.comのhorseページのhtmlをスクレイピングしてdata/html/horseに保存する関数
+    """
+    html_path_list = []
+    for horse_id in tqdm(horse_id_list):
+        url = 'https://db.netkeiba.com/horse/' + horse_id
+        html = urlopen(url).read()
+        file_name = 'data/html/horse/'+ horse_id + '.bin'
+        html_path_list.append(file_name)
+        if skip and os.path.isfile(file_name):
+            print(f'horse_id {horse_id} skipped.')
+            continue
+        with open(file_name, 'wb')as f:
+            f.write(html)
+        time.sleep(1)
+    return html_path_list
 
-#hourseページのスクレイピングと、競走成績のテーブル化
+def getRawDataHorseResults(html_path_list:list):
+    """
+    horseページのhtmlを受け取って、馬の過去成績のdataframeテーブルに変換する関数
+    """
+    horse_results = {}
+    for html_path in tqdm(html_path_list):
+        with open(html_path, 'rb') as f:
+            html = f.read()#保存してあるbinファイルを読みこむ
+            
+            df = pd.read_html(html)[3]
+            #受賞歴がある馬の場合、3番目に受賞歴テーブルが来るため、4番目のデータを取得する
+            if df.columns[0]=='受賞歴':
+                df = pd.read_html(html)[4]
+
+            horse_id = re.findall('(?<=horse/)\d+', html_path)[0]            
+            df.index = [horse_id] * len(df)
+            horse_results[horse_id] = df
+
+        #pd.DataFrame型にして一つのデータにまとめる
+        horse_results_df = pd.concat([horse_results[key] for key in horse_results])
+    return horse_results_df
+
+def getHTMLPed(horse_id_list: list,slip: bool = True):
+    """
+    netkeiba.comのpedページのhtmlをスクレイピングしてdata/html/pedに保存する関数
+    """
+    html_path_list = []
+    for horse_id in tqdm(horse_id_list):
+        url = 'https://db.netkeiba.com/horse/ped/' + horse_id
+        html = urlopen(url).read()
+        file_name = 'data/html/ped/'+ horse_id + '.bin'
+        html_path_list.append(file_name)
+        if skip and os.path.isfile(file_name):
+            print(f'horse_id {horse_id} skipped.')
+            continue
+        with open(file_name, 'wb')as f:
+            f.write(html)
+        time.sleep(1)
+    return html_path_list
+
+def getRawDataPed(html_path_list:list):
+    """
+    horseページのhtmlを受け取って、馬の過去成績のdataframeテーブルに変換する関数
+    """
+    peds = {}
+    for html_path in tqdm(html_path_list):
+        with open(html_path, 'rb') as f:
+            html = f.read()#保存してあるbinファイルを読みこむ
+            df = pd.read_html(html)[0]
+            #重複を削除して1列のSeries型データに直す
+            generations = {}
+            horse_id = re.findall('(?<=ped/)\d+', html_path)[0]            
+            
+            for i in reversed(range(5)):
+                generations[i] = df[i]
+                df.drop([i], axis=1, inplace=True)
+                df = df.drop_duplicates()
+            ped = pd.concat([generations[i] for i in range(5)]).rename(horse_id)
+            peds[horse_id] = ped.reset_index(drop=True)
+    
+    #pd.DataFrame型にして一つのデータにまとめる
+    peds_df = pd.concat([peds[key] for key in peds_peds], axis=1).T.add_prefix('peds_')
+    return peds_df
