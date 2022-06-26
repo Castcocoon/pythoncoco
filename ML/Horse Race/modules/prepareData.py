@@ -7,9 +7,7 @@ import pandas as pd
 from bs4 import BeautifulSoup
 import re
 
-#raceページからのスクレイピング
-
-def getHTMLRace(race_id_list: list,slip: bool = True):
+def getHTMLRace(race_id_list: list,skip: bool = True):
     """
     netkeiba.comのraceページのhtmlをスクレイピングしてdata/html/raceに保存する関数
     """
@@ -27,7 +25,7 @@ def getHTMLRace(race_id_list: list,slip: bool = True):
         time.sleep(1)
     return html_path_list
 
-def getRawDataResults(html_path_list: list):
+def getRawDataRaceResults(html_path_list: list):
     """
     raceページのhtmlを受け取って、レース結果テーブルに変換する関数
     """
@@ -35,8 +33,7 @@ def getRawDataResults(html_path_list: list):
     for html_path in tqdm(html_path_list):
         with open(html_path, 'rb') as f:
             html = f.read()#保存してあるbinファイルを読みこむ
-            df = pd.read_csv(html[0])
-
+            df = pd.read_html(html)[0]#レース結果のテーブルを取得
             soup = BeautifulSoup(html, 'html.parser')#htmlをBeautifulSoupで解析
 
             #馬IDを取得
@@ -65,7 +62,7 @@ def getRawDataResults(html_path_list: list):
         
         return race_results_df
 
-def getRawDataInfo(html_path_list: list):
+def getRawDataRaceInfo(html_path_list: list):
     """
     raceページのhtmlを受け取って、レース情報(天気等)テーブルに変換する関数
     """
@@ -80,28 +77,28 @@ def getRawDataInfo(html_path_list: list):
             + soup.find("div", attrs={"class": "data_intro"}).find_all("p")[1].text
         )
         info = re.findall(r'\w+', texts)
-        df = pd.Dateframe()
+        df = pd.DataFrame()
         for text in info:
             if text in ["芝", "ダート"]:
-                df["race_type"] = [text] * len(df)
+                df["race_type"] = [text] 
             if "障" in text:
-                df["race_type"] = ["障害"] * len(df)
+                df["race_type"] = ["障害"] 
             if "m" in text:
-                df["course_len"] = [int(re.findall(r"\d+", text)[-1])] * len(df)
+                df["course_len"] = [int(re.findall(r"\d+", text)[-1])] 
             if text in ["良", "稍重", "重", "不良"]:
-                df["ground_state"] = [text] * len(df)
+                df["ground_state"] = [text] 
             if text in ["曇", "晴", "雨", "小雨", "小雪", "雪"]:
-                df["weather"] = [text] * len(df)
+                df["weather"] = [text]
             if "年" in text:
                 df["date"] = [text] 
             
         #インデックスをrace_idにする
         race_id = re.findall('(?<=race/)\d+', html_path)[0]
-        df.index = [race_id] * len(df)
+        df.index = [race_id] 
 
         race_infos[race_id] = df
-        #pd.DataFrame型にして一つのデータにまとめる
-        race_infos_df = pd.concat([race_infos[key] for key in race_infos])
+    #pd.DataFrame型にして一つのデータにまとめる
+    race_infos_df = pd.concat([race_infos[key] for key in race_infos])
     return race_infos_df
 
 def getRawDataReturn(html_path_list:list):
@@ -119,12 +116,12 @@ def getRawDataReturn(html_path_list:list):
             #dfsの1番目に単勝〜馬連、2番目にワイド〜三連単がある
             df = pd.concat([dfs[1], dfs[2]])
 
-            race_id = re.findall('\d + ', html_path)[0]
+            race_id = re.findall('\d+', html_path)[0]
             df.index = [race_id] * len(df)
             return_tables[race_id] = df
 
         #pd.DataFrame型にして一つのデータにまとめる
-        return_tables_df = pd.concat([return_tables[key] for key in return_tables])
+    return_tables_df = pd.concat([return_tables[key] for key in return_tables])
     return return_tables_df
 
 def getHTMLHorse(horse_id_list: list,slip: bool = True):
@@ -206,5 +203,5 @@ def getRawDataPed(html_path_list:list):
             peds[horse_id] = ped.reset_index(drop=True)
     
     #pd.DataFrame型にして一つのデータにまとめる
-    peds_df = pd.concat([peds[key] for key in peds_peds], axis=1).T.add_prefix('peds_')
+    peds_df = pd.concat([peds[key] for key in peds], axis=1).T.add_prefix('peds_')
     return peds_df
