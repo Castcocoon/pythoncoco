@@ -1,11 +1,23 @@
 import time
-from unittest import skip
+from unittest import result, skip
 from urllib.request import urlopen
 from tqdm.notebook import tqdm
 import os
 import pandas as pd
 from bs4 import BeautifulSoup
 import re
+import glob
+
+def get_race_id_list():
+    race_id_list = []
+    for year in range(2017,2023,1):
+        for place in range(1,11,1):
+            for kai in range(1,6,1):
+                for day in range(1,9,1):
+                    for r in range(1,13,1):
+                        race_id = str(year) + str(place).zfill(2) + str(kai).zfill(2) + str(day).zfill(2) + str(r).zfill(2)
+                        race_id_list.append(race_id)
+    return race_id_list
 
 def getHTMLRace(race_id_list: list,skip: bool = True):
     """
@@ -31,96 +43,105 @@ def getRawDataRaceResults(html_path_list: list):
     """
     race_results = {}
     for html_path in tqdm(html_path_list):
-        with open(html_path, 'rb') as f:
-            html = f.read()#保存してあるbinファイルを読みこむ
-            df = pd.read_html(html)[0]#レース結果のテーブルを取得
-            soup = BeautifulSoup(html, 'html.parser')#htmlをBeautifulSoupで解析
+        try:
+            with open(html_path, 'rb') as f:
+                html = f.read()#保存してあるbinファイルを読みこむ
+                df = pd.read_html(html)[0]#レース結果のテーブルを取得
+                soup = BeautifulSoup(html, 'html.parser')#htmlをBeautifulSoupで解析
 
-            #馬IDを取得
-            horse_id_list = []
-            horse_a_list = soup.find('table', attrs = {'summary':'レース結果'}).find_all('a', attrs = {'href': re.compile('^/horse/')})
-            for horse_a in horse_a_list:
-                horse_id = re.findall(r'\d+', horse_a['href'])
-                horse_id_list.append(horse_id[0])
-            #騎手IDを取得
-            jockey_id_list = []
-            jockey_a_list = soup.find("table", attrs={"summary": "レース結果"}).find_all( "a", attrs={"href": re.compile("^/jockey")} )
-            for jockye_a in jockey_a_list:
-                jockey_id = re.findall(r'\d+', jockye_a['href'])
-                jockey_id_list.append(jockey_id[0])
-            
-            df["horse_id"] = horse_id_list
-            df["jockey_id"] = jockey_id_list
-            
-            #インデックスをrace_idにする
-            race_id = re.findall('(?<=race/)\d+', html_path)[0]
-            df.index = [race_id] * len(df)
+                #馬IDを取得
+                horse_id_list = []
+                horse_a_list = soup.find('table', attrs = {'summary':'レース結果'}).find_all('a', attrs = {'href': re.compile('^/horse/')})
+                for horse_a in horse_a_list:
+                    horse_id = re.findall(r'\d+', horse_a['href'])
+                    horse_id_list.append(horse_id[0])
+                #騎手IDを取得
+                jockey_id_list = []
+                jockey_a_list = soup.find("table", attrs={"summary": "レース結果"}).find_all( "a", attrs={"href": re.compile("^/jockey")} )
+                for jockye_a in jockey_a_list:
+                    jockey_id = re.findall(r'\d+', jockye_a['href'])
+                    jockey_id_list.append(jockey_id[0])
+                
+                df["horse_id"] = horse_id_list
+                df["jockey_id"] = jockey_id_list
+                
+                #インデックスをrace_idにする
+                race_id = re.findall('(?<=race/)\d+', html_path)[0]
+                df.index = [race_id] * len(df)
 
-            race_results[race_id] = df
-        #pd.DataFrame型にして一つのデータにまとめる
-        race_results_df = pd.concat([race_results[key] for key in race_results])
-        
-        return race_results_df
+                race_results[race_id] = df
+                print(html_path)
+        except:
+            print(f'{html_path} is not exsist')
+    #pd.DataFrame型にして一つのデータにまとめる
+    race_results_df = pd.concat([race_results[key] for key in race_results])
+    return race_results_df
 
-def getRawDataRaceInfo(html_path_list: list):
+def getRawDataRaceInfos(html_path_list: list):
     """
     raceページのhtmlを受け取って、レース情報(天気等)テーブルに変換する関数
     """
     race_infos = {}
     for html_path in tqdm(html_path_list):
-        with open(html_path, 'rb') as f:
-            html = f.read()#保存してあるbinファイルを読みこむ
-            soup = BeautifulSoup(html, 'html.parser')#htmlをBeautifulSoupで解析
-        #天候、レースの種類、コースの長さ、馬場の状態、日付をスクレイピング
-        texts = (
-            soup.find("div", attrs={"class": "data_intro"}).find_all("p")[0].text
-            + soup.find("div", attrs={"class": "data_intro"}).find_all("p")[1].text
-        )
-        info = re.findall(r'\w+', texts)
-        df = pd.DataFrame()
-        for text in info:
-            if text in ["芝", "ダート"]:
-                df["race_type"] = [text] 
-            if "障" in text:
-                df["race_type"] = ["障害"] 
-            if "m" in text:
-                df["course_len"] = [int(re.findall(r"\d+", text)[-1])] 
-            if text in ["良", "稍重", "重", "不良"]:
-                df["ground_state"] = [text] 
-            if text in ["曇", "晴", "雨", "小雨", "小雪", "雪"]:
-                df["weather"] = [text]
-            if "年" in text:
-                df["date"] = [text] 
-            
-        #インデックスをrace_idにする
-        race_id = re.findall('(?<=race/)\d+', html_path)[0]
-        df.index = [race_id] 
-
-        race_infos[race_id] = df
+        try:
+            with open(html_path, 'rb') as f:
+                html = f.read()#保存してあるbinファイルを読みこむ
+                soup = BeautifulSoup(html, 'html.parser')#htmlをBeautifulSoupで解析
+            #天候、レースの種類、コースの長さ、馬場の状態、日付をスクレイピング
+            texts = (
+                soup.find("div", attrs={"class": "data_intro"}).find_all("p")[0].text
+                + soup.find("div", attrs={"class": "data_intro"}).find_all("p")[1].text
+            )
+            info = re.findall(r'\w+', texts)
+            df = pd.DataFrame()
+            for text in info:
+                if text in ["芝", "ダート"]:
+                    df["race_type"] = [text] 
+                if "障" in text:
+                    df["race_type"] = ["障害"] 
+                if "m" in text:
+                    df["course_len"] = [int(re.findall(r"\d+", text)[-1])] 
+                if text in ["良", "稍重", "重", "不良"]:
+                    df["ground_state"] = [text] 
+                if text in ["曇", "晴", "雨", "小雨", "小雪", "雪"]:
+                    df["weather"] = [text]
+                if "年" in text:
+                    df["date"] = [text] 
+                
+            #インデックスをrace_idにする
+            race_id = re.findall('(?<=race/)\d+', html_path)[0]
+            df.index = [race_id] 
+            race_infos[race_id] = df
+            print(html_path)
+        except:
+            print(f'{html_path} is not exsist')
     #pd.DataFrame型にして一つのデータにまとめる
     race_infos_df = pd.concat([race_infos[key] for key in race_infos])
     return race_infos_df
 
-def getRawDataReturn(html_path_list:list):
+def getRawDataReturnTables(html_path_list:list):
     """
     raceページのhtmlを受け取って、払い戻しテーブルに変換する関数
     """
     return_tables = {}
     for html_path in tqdm(html_path_list):
-        with open(html_path, 'rb') as f:
-            html = f.read()#保存してあるbinファイルを読みこむ
+        try:
+            with open(html_path, 'rb') as f:
+                html = f.read()#保存してあるbinファイルを読みこむ
 
-            html = html.replace(b'<br />', b'br')
-            dfs = pd.read_html(html)
+                html = html.replace(b'<br />', b'br')
+                dfs = pd.read_html(html)
 
-            #dfsの1番目に単勝〜馬連、2番目にワイド〜三連単がある
-            df = pd.concat([dfs[1], dfs[2]])
+                #dfsの1番目に単勝〜馬連、2番目にワイド〜三連単がある
+                df = pd.concat([dfs[1], dfs[2]])
 
-            race_id = re.findall('\d+', html_path)[0]
-            df.index = [race_id] * len(df)
-            return_tables[race_id] = df
-
-        #pd.DataFrame型にして一つのデータにまとめる
+                race_id = re.findall('\d+', html_path)[0]
+                df.index = [race_id] * len(df)
+                return_tables[race_id] = df
+                print(html_path)
+        except:
+            print(f'{html_path} is not exsist')
+    #pd.DataFrame型にして一つのデータにまとめる
     return_tables_df = pd.concat([return_tables[key] for key in return_tables])
     return return_tables_df
 
@@ -139,29 +160,34 @@ def getHTMLHorse(horse_id_list: list,slip: bool = True):
             continue
         with open(file_name, 'wb')as f:
             f.write(html)
+        print(f'horse_id {horse_id} saved.')
         time.sleep(1)
     return html_path_list
 
-def getRawDataHorseResults(html_path_list:list):
+def getRawDataHorse(html_path_list:list):
     """
     horseページのhtmlを受け取って、馬の過去成績のdataframeテーブルに変換する関数
     """
     horse_results = {}
     for html_path in tqdm(html_path_list):
-        with open(html_path, 'rb') as f:
-            html = f.read()#保存してあるbinファイルを読みこむ
-            
-            df = pd.read_html(html)[3]
-            #受賞歴がある馬の場合、3番目に受賞歴テーブルが来るため、4番目のデータを取得する
-            if df.columns[0]=='受賞歴':
-                df = pd.read_html(html)[4]
+        try:
+            with open(html_path, 'rb') as f:
+                html = f.read()#保存してあるbinファイルを読みこむ
+                
+                df = pd.read_html(html)[3]
+                #受賞歴がある馬の場合、3番目に受賞歴テーブルが来るため、4番目のデータを取得する
+                if df.columns[0]=='受賞歴':
+                    df = pd.read_html(html)[4]
 
-            horse_id = re.findall('(?<=horse/)\d+', html_path)[0]            
-            df.index = [horse_id] * len(df)
-            horse_results[horse_id] = df
+                horse_id = re.findall('(?<=horse/)\d+', html_path)[0]            
+                df.index = [horse_id] * len(df)
+                horse_results[horse_id] = df
+                print(html_path)
+        except:
+            print(f'{html_path} is not exsist')
 
-        #pd.DataFrame型にして一つのデータにまとめる
-        horse_results_df = pd.concat([horse_results[key] for key in horse_results])
+    #pd.DataFrame型にして一つのデータにまとめる
+    horse_results_df = pd.concat([horse_results[key] for key in horse_results])
     return horse_results_df
 
 def getHTMLPed(horse_id_list: list,slip: bool = True):
@@ -182,26 +208,75 @@ def getHTMLPed(horse_id_list: list,slip: bool = True):
         time.sleep(1)
     return html_path_list
 
-def getRawDataPed(html_path_list:list):
+def getRawDataPeds(html_path_list:list):
     """
     horseページのhtmlを受け取って、馬の過去成績のdataframeテーブルに変換する関数
     """
     peds = {}
     for html_path in tqdm(html_path_list):
-        with open(html_path, 'rb') as f:
-            html = f.read()#保存してあるbinファイルを読みこむ
-            df = pd.read_html(html)[0]
-            #重複を削除して1列のSeries型データに直す
-            generations = {}
-            horse_id = re.findall('(?<=ped/)\d+', html_path)[0]            
-            
-            for i in reversed(range(5)):
-                generations[i] = df[i]
-                df.drop([i], axis=1, inplace=True)
-                df = df.drop_duplicates()
-            ped = pd.concat([generations[i] for i in range(5)]).rename(horse_id)
-            peds[horse_id] = ped.reset_index(drop=True)
+        try:
+            with open(html_path, 'rb') as f:
+                html = f.read()#保存してあるbinファイルを読みこむ
+                df = pd.read_html(html)[0]
+                #重複を削除して1列のSeries型データに直す
+                generations = {}
+                horse_id = re.findall('(?<=ped/)\d+', html_path)[0]            
+                
+                for i in reversed(range(5)):
+                    generations[i] = df[i]
+                    df.drop([i], axis=1, inplace=True)
+                    df = df.drop_duplicates()
+                ped = pd.concat([generations[i] for i in range(5)]).rename(horse_id)
+                peds[horse_id] = ped.reset_index(drop=True)
+                print(html_path)
+        except:
+            print(f'{html_path} is not exsist')
     
     #pd.DataFrame型にして一つのデータにまとめる
     peds_df = pd.concat([peds[key] for key in peds], axis=1).T.add_prefix('peds_')
     return peds_df
+
+def get_html_path_list(dir:str):
+    return glob.glob(f'data/html/{dir}/*.bin')
+
+def get_horse_id_list():
+    race_results_df = pd.read_pickle('data/raw/race_results/race_results.pickle')
+    horse_id_list = race_results_df['horse_id'].unique()
+    return horse_id_list
+
+def main():
+    race_id_list = get_race_id_list()
+    getHTMLRace(race_id_list)
+    print('get race HTML done!')
+    race_html_path_list = get_html_path_list('race')
+    print('get race_html_path_list')
+    race_results = getRawDataRaceResults(race_html_path_list)
+    race_results.to_pickle('data/raw/race_results/race_results.pickle')
+    print('race results done!')
+    race_infos = getRawDataRaceInfos(race_html_path_list)
+    race_infos.to_pickle('data/raw/race_infos/race_infos.pickle')
+    print('race info done!')
+    return_tables = getRawDataReturnTables(race_html_path_list)
+    return_tables.to_pickle('data/raw/return_tables/return_tables.pickle')
+    print('return tabeles done!')
+
+    horse_id_list = get_horse_id_list()
+    print('get horse_id_list')
+    getHTMLHorse(horse_id_list)
+    print('get horse HTLM done!')
+    horse_html_path_list = get_html_path_list('horse')
+    print('get horse_html_path_list')
+    horse = getRawDataHorse(horse_html_path_list)
+    horse.to_pickle('data/raw/horse/horse.pickle')
+    print('horse done!')
+
+    getHTMLPed(horse_id_list)
+    print('get ped HTML done!')
+    peds_html_path_list = get_html_path_list('ped')
+    print('get peds_html_path_list')
+    peds = getRawDataPeds(peds_html_path_list)
+    peds.to_pickle('data/raw/peds/peds.pickle')
+    print('peds done!')
+
+if __name__ == '__main__':
+    main()
