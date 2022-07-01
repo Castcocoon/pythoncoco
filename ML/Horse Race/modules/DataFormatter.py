@@ -78,9 +78,3 @@ def split_data(df,test_size= 0.3):
     train = df.loc[train_id_list]
     test = df.loc[test_id_list]
     return train, test
-
-
-# race_id_listは羅列したけど、return_tableはrace_resultsのrace_resultsから取得すると、無駄なく出来る
-
-def format_fukusyo():
-    return NULL
