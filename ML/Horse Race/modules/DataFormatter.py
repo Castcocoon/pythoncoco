@@ -1,9 +1,14 @@
+import imp
 import os
+import time
 import glob
 import re
 import pandas as pd 
-from datetime import datetime
+import requests
+import urllib.request
+from bs4 import BeautifulSoup
 import warnings
+from tqdm.notebook import tqdm
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import roc_auc_score
 warnings.filterwarnings("ignore")
@@ -25,7 +30,7 @@ def parse_file(race_results):
 
     #性齢を性と年齢に分割
     df['性']= df['性齢'].map(lambda x: str(x)[0])
-    df['齢']= df['性齢'].map(lambda x: str(x)[1:]).astype(int)
+    df['年齢']= df['性齢'].map(lambda x: str(x)[1:]).astype(int)
     
     # #馬体重を体重と体重変化に分割
     df['体重']= df['馬体重'].str.split('(').str[0].astype(int)
@@ -35,7 +40,7 @@ def parse_file(race_results):
     df['単勝']= df['単勝'].astype(float)
     
     #いらない列を削除
-    df = df.drop(['タイム', '着差', '調教師', '性齢', '馬体重'], axis=1)
+    df = df.drop(['タイム', '着差', '調教師', '性齢', '馬体重','馬名', '騎手'], axis=1)
     
     df['date'] = pd.to_datetime(df['date'], format='%Y年%m月%d日')
     
@@ -52,11 +57,10 @@ def parse_horse_file(horse_results):
     df.drop(['日付'], axis=1, inplace=True) 
 
     df['賞金'].fillna(0, inplace=True)
-    df.rename(columns={'着順':'着順_avg', '賞金':f'賞金_avg'}, inplace=True)
     return df
 
 def get_average_horse_results(horse_results,horse_id_list,date,n_samples = 'all'):
-    target_df = horse_results[horse_results.index.isin(horse_id_list)]
+    target_df = horse_results.query('index in @horse_id_list')
     if n_samples == 'all':
         filterd_df = target_df[target_df['date']<date]
     elif n_samples > 0:
@@ -64,27 +68,22 @@ def get_average_horse_results(horse_results,horse_id_list,date,n_samples = 'all'
     else:
         raise ValueError('n_samples must be positive integer or "all"')
     
-    avg_df = filterd_df.groupby(level = 0)['着順_avg', '賞金_avg'].mean()
-    avg_df.rename(columns={'着順_avg':f'着順_avg_{n_samples}_R', '賞金_avg':f'賞金_avg_{n_samples}_R'}, inplace=True)
+    avg_df = filterd_df.groupby(level = 0)['着順', '賞金'].mean()
+    avg_df.rename(columns={'着順':f'着順_avg_{n_samples}_R', '賞金':f'賞金_avg_{n_samples}_R'}, inplace=True)
 
     return avg_df
 
-def merge(race_results,race_infos,horse_results,n_samples = 'all'):
-    race_results_infos = race_results.merge(race_infos,left_index=True,right_index=True,how='inner')
-    race_results_infos = parse_file(race_results_infos)
+def merge(race_results,horse_results,n_samples = 'all'):
     horse_results = parse_horse_file(horse_results[['日付', '着順', '賞金']])
-    date_list = race_results_infos['date'].unique()
+    date_list = race_results['date'].unique()
     merged_list = []
     for date in date_list:
-        df = race_results_infos[race_results_infos['date'] == date]
+        df = race_results[race_results['date'] == date]
         horse_id_list = df['horse_id']
         horse_results_avg = get_average_horse_results(horse_results,horse_id_list,date,n_samples)
         merged_df = df.merge(horse_results_avg,left_on = 'horse_id', right_index=True, how='left')
-        #concatenate
         merged_list.append(merged_df)
     merged_df = pd.concat(merged_list)
-    merged_df['rank'] = merged_df['着順'].map(lambda x: 1 if x < 4 else 0)
-    merged_df.drop(['着順', '騎手'], axis= 1,inplace= True)
     return merged_df
 
 def split_data(df,test_size= 0.3):
@@ -98,14 +97,25 @@ def split_data(df,test_size= 0.3):
 def process_category(df,category_list):
     target_df = df.copy()
     for column in category_list:
-        target_df[column] = LabelEncoder().fit_transform(target_df[column].fillna('Na'))
+        target_df[column] = LabelEncoder().fit_transform(target_df[column])
     
     target_df = pd.get_dummies(target_df)
 
     for column in category_list:
-        target_df[column] = df[column].astype('category')
+        target_df[column] = target_df[column].astype('category')
     return target_df
 
+def gain(return_func,X,n_samples = 100):
+    gain = {}
+    for i in tqdm(range(n_samples)):
+        threshold = i/n_samples
+        n_bets,money = return_func(X,threshold)
+        gain[n_bets] = (n_bets * 100 + money)/(n_bets * 100)
+    return pd.Series(gain)
+
+def update_date(old,new):
+    filtered_old = old[~old.index.isin(new.index)]
+    return pd.concat([filtered_old,new])
 class Return:
     def __init__(self,return_tables):
         self.return_tables = return_tables
@@ -116,31 +126,51 @@ class Return:
         wins = fukusho[1].str.split('br', expand = True).drop([3], axis = 1)
         wins.columns = ['win_0', 'win_1', 'win_2']
         returns = fukusho[2].str.split('br', expand = True).drop([3], axis = 1)
+        returns.columns = ['return_0', 'return_1', 'return_2']
 
         df = pd.concat([wins, returns], axis = 1)
         for column in df.columns:
-            df[column] = df[column].str.replace(' ', '')
+            df[column] = df[column].str.replace(',', '')
         return df.fillna(0).astype(int)
+
+    @property
+    def tansho(self):
+        tansho = self.return_tables[self.return_tables[0] == '単勝'][[1,2]]
+        tansho.columns = ['win', 'return']
+
+        for column in tansho.columns:
+            tansho[column] = pd.to_numeric(tansho[column], errors='coerce')
+        return tansho
+
 class ModelEvaluator:
-    def __init__(self,model,return_tables):
+    def __init__(self,model,return_tables,std = True):
         self.model = model
         self.fukusho = Return(return_tables).fukusho
+        self.tansho = Return(return_tables).tansho
+        self.std = std
 
     def predict_proba(self,X):
-        return self.model.predict(X)[:,1]
+        #0と1に分類される確率を求めて、そのうち、1になる確率を返す
+        proba = pd.Series(self.model.predict_proba(X)[:,1], index=X.index)
+        if self.std:
+            standard_scaler = lambda x: (x - x.mean())/x.std()
+            proba = proba.groupby(level = 0).transform(standard_scaler)
+            proba = (proba - proba.min())/(proba.max() - proba.min())
+        return proba
 
-    def predict(self,X,threshold):
+    def predict(self,X,threshold = 0.5):
         y_pred = self.predict_proba(X)
         return [0 if y < threshold else 1 for y in y_pred]
 
     def score(self,X,y):
         return roc_auc_score(y,self.predict_proba(X))
 
-    def feature_importance(self,X,n_features):
+    def feature_importance(self,X,n_features = 20):
         importances = pd.DataFrame({'feature':X.columns,'importance':self.model.feature_importances_})
         return importances.sort_values(by='importance',ascending=False).head(n_features)
 
-    def predict_table(self,X,threshold = 0.5, bet_only = 0.5):
+#1になる確率がthreshold以上のものを抽出する
+    def predict_table(self,X,threshold = 0.5, bet_only = True):
         pred_table = X.copy()
         pred_table['pred'] = self.predict(X,threshold)
         if bet_only:
@@ -148,10 +178,104 @@ class ModelEvaluator:
         else:
             return pred_table
 
-    def calculate_profit(self,X,threshold = 0.5):
+    def fukusho_return(self,X,threshold = 0.5):
         pred_table = self.predict_table(X,threshold)
+        n_bets = len(pred_table)
+        money = -100 * n_bets
         df = self.fukusho.copy()
         df = df.merge(pred_table,left_index = True, right_index=True, how='right')
         for i in range(3):
             money += df[df[f'win_{i}'] == df['馬番']][f'return_{i}'].sum()
-        return money
+        return n_bets,money
+
+    def tansho_return(self,X,threshold = 0.5):
+        pred_table = self.predict_table(X,threshold)
+        n_bets = len(pred_table)
+        money = -100 * n_bets
+        df = self.tansho.copy()
+        df = df.merge(pred_table,left_index = True, right_index=True, how='right')
+        money += df[df['win'] == df['馬番']]['return'].sum()
+        return n_bets,money
+
+class ShutubaTable:
+    def __init__(self):
+        self.shutuba_tables = pd.DataFrame()
+        self.shutuba_tables_p = pd.DataFrame()
+        self.shutuba_tables_h = pd.DataFrame() # horse_resultsをmergeしたもの
+        self.shutuba_tables_pe = pd.DataFrame() # Pedsをmergeしたもの
+
+    def scrape_shutuba_table(self,race_id_list,date):
+        for race_id in tqdm(race_id_list):
+            url = 'https://race.netkeiba.com/race/shutuba.html?race_id=' + race_id
+            df = pd.read_html(url)[0]
+            df = df.T.reset_index(level=0,drop=True).T
+
+            html = urllib.request.urlopen(url).read()
+            soup = BeautifulSoup(html, 'html.parser')
+
+            texts = soup.find('div', attrs={'class': 'RaceData01'}).text
+            texts = re.findall(r'\w+', texts)
+            for text in texts:
+                if 'm' in text:
+                    df['course_len'] = [int(re.findall(r'\d+', text)[0])] * len(df)
+                if text in ['曇','晴','雨', '小雨', '小雪', '雪']:
+                    df['weather'] = [text] * len(df)
+                if text in ['良', '稍重', '重', '不良']:
+                    df['ground_state'] = [text] * len(df)
+                if '芝' in text:
+                    df['race_type'] = ['芝'] * len(df)
+                if '障' in text:
+                    df['race_type'] = ['障害'] * len(df)
+                if 'ダ' in text:
+                    df['race_type'] = ['ダート'] * len(df)
+
+            df['date'] = [date] * len(df)
+
+            horse_id_list = []
+            horse_td_list = soup.find_all('td', attrs={'class': 'HorseInfo'})
+            for td in horse_td_list:
+                horse_id = re.findall(r'\d+', td.find('a')['href'])[0]
+                horse_id_list.append(horse_id)
+            
+            jockey_id_list = []
+            jockey_td_list = soup.find_all('td', attrs={'class': 'Jockey'})
+            for td in jockey_td_list:
+                jockey_id = re.findall(r'\d+', td.find('a')['href'])[0]
+                jockey_id_list.append(jockey_id)
+            df['horse_id'] = horse_id_list
+            df['jockey_id'] = jockey_id_list
+
+            df.index = [race_id] * len(df)
+            self.shutuba_tables = self.shutuba_tables.append(df)
+            time.sleep(1)
+    
+    def preprocessing(self):
+        df = self.shutuba_tables.copy()
+
+        #性齢を性と年齢に分割
+        df['性']= df['性齢'].map(lambda x: str(x)[0])
+        df['年齢']= df['性齢'].map(lambda x: str(x)[1:]).astype(int)
+        
+        # #馬体重を体重と体重変化に分割
+        df['体重']= df['馬体重(増減)'].str.split('(').str[0].astype(int)
+        df['体重変化']= df['馬体重(増減)'].str.split('(').str[1].str.split(')').str[0].astype(int)
+        
+        df['date'] = pd.to_datetime(df['date'])
+        
+        #いらない列を削除
+        df = df[['枠', '馬番', '性齢', '斤量','course_len','weather','race_type',
+        'ground_state', 'date', 'horse_id', 'jockey_id','性', '年齢', '体重', '体重変化']]
+        
+        self.shutuba_tables_p = df.rename(columns={'枠': '枠番'})
+
+
+    def merge_horse_results(self,horse_results,n_samples_list = [5,9,'all']):
+        self.shutuba_tables_h = self.shutuba_tables_p.copy()
+        for n_samples in n_samples_list:
+            self.shutuba_tables_h = merge(self.shutuba_tables_h,horse_results,n_samples)
+
+    def merge_peds(self,peds):
+        self.shutuba_tables_pe = self.shutuba_tables_h.merge(peds,left_on = 'horse_id', right_index=True, how='left')
+        self.no_peds = self.shutuba_tables_pe[self.shutuba_tables_pe['peds_0'].isnull()]['horse_id'].unique()
+        if len(self.no_peds) > 0:
+            print('no peds, please scrape peds')
