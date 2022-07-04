@@ -1,50 +1,14 @@
-import imp
-import os
 import time
-import glob
 import re
 import pandas as pd 
-import requests
 import urllib.request
 from bs4 import BeautifulSoup
 import warnings
 from tqdm.notebook import tqdm
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import roc_auc_score
+import numpy as np
 warnings.filterwarnings("ignore")
-
-
-def get_file_path():
-    files = glob.glob('data/raw/*/*.pickle')
-    return files
-
-def get_file_name(file_path):
-    file_name = os.path.splitext(os.path.basename(file_path))[0]
-    return file_name
-
-def parse_file(race_results):
-    df = race_results.copy()
-    # 着順に数字以外の文字列が含まれているものを取り除く
-    df = df[~(df['着順'].astype(str).str.contains('\D'))]
-    df['着順']= df['着順'].astype(int)
-
-    #性齢を性と年齢に分割
-    df['性']= df['性齢'].map(lambda x: str(x)[0])
-    df['年齢']= df['性齢'].map(lambda x: str(x)[1:]).astype(int)
-    
-    # #馬体重を体重と体重変化に分割
-    df['体重']= df['馬体重'].str.split('(').str[0].astype(int)
-    df['体重変化']= df['馬体重'].str.split('(').str[1].str.split(')').str[0].astype(int)
-    
-    #データをfloat型に変換
-    df['単勝']= df['単勝'].astype(float)
-    
-    #いらない列を削除
-    df = df.drop(['タイム', '着差', '調教師', '性齢', '馬体重','馬名', '騎手'], axis=1)
-    
-    df['date'] = pd.to_datetime(df['date'], format='%Y年%m月%d日')
-    
-    return df
 
 def parse_horse_file(horse_results):
     df = horse_results.copy()
@@ -77,7 +41,7 @@ def merge(race_results,horse_results,n_samples = 'all'):
     horse_results = parse_horse_file(horse_results[['日付', '着順', '賞金']])
     date_list = race_results['date'].unique()
     merged_list = []
-    for date in date_list:
+    for date in tqdm(date_list):
         df = race_results[race_results['date'] == date]
         horse_id_list = df['horse_id']
         horse_results_avg = get_average_horse_results(horse_results,horse_id_list,date,n_samples)
@@ -90,32 +54,19 @@ def split_data(df,test_size= 0.3):
     sorted_id_list = df.sort_values(by=['date']).index.unique()
     train_id_list = sorted_id_list[:round(len(sorted_id_list)*(1-test_size))]
     test_id_list = sorted_id_list[round(len(sorted_id_list)*(1-test_size)):]
-    train = df.loc[train_id_list].drop(['date'],axis=1)
-    test = df.loc[test_id_list].drop(['date'],axis=1)
+    train = df.loc[train_id_list]#.drop(['date'],axis=1)
+    test = df.loc[test_id_list]#.drop(['date'],axis=1)
     return train, test
 
-def process_category(df,category_list):
-    target_df = df.copy()
-    for column in category_list:
-        target_df[column] = LabelEncoder().fit_transform(target_df[column])
-    
-    target_df = pd.get_dummies(target_df)
-
-    for column in category_list:
-        target_df[column] = target_df[column].astype('category')
-    return target_df
-
-def gain(return_func,X,n_samples = 100):
+def gain(return_func,X,n_samples = 100,lower = 50,min_threshold = 0.5):
     gain = {}
     for i in tqdm(range(n_samples)):
         threshold = i/n_samples
-        n_bets,money = return_func(X,threshold)
-        gain[n_bets] = (n_bets * 100 + money)/(n_bets * 100)
+        n_bets,return_rate = return_func(X,threshold)
+        if n_bets > lower:
+            gain[n_bets] = return_rate
     return pd.Series(gain)
 
-def update_date(old,new):
-    filtered_old = old[~old.index.isin(new.index)]
-    return pd.concat([filtered_old,new])
 class Return:
     def __init__(self,return_tables):
         self.return_tables = return_tables
@@ -123,9 +74,9 @@ class Return:
     @property
     def fukusho(self):
         fukusho = self.return_tables[self.return_tables[0] == '複勝'][[1,2]]
-        wins = fukusho[1].str.split('br', expand = True).drop([3], axis = 1)
+        wins = fukusho[1].str.split('br', expand = True).drop([3,4], axis = 1)
         wins.columns = ['win_0', 'win_1', 'win_2']
-        returns = fukusho[2].str.split('br', expand = True).drop([3], axis = 1)
+        returns = fukusho[2].str.split('br', expand = True).drop([3,4], axis = 1)
         returns.columns = ['return_0', 'return_1', 'return_2']
 
         df = pd.concat([wins, returns], axis = 1)
@@ -186,7 +137,8 @@ class ModelEvaluator:
         df = df.merge(pred_table,left_index = True, right_index=True, how='right')
         for i in range(3):
             money += df[df[f'win_{i}'] == df['馬番']][f'return_{i}'].sum()
-        return n_bets,money
+        return_rate = (n_bets * 100 + money)/(n_bets * 100)
+        return n_bets,return_rate
 
     def tansho_return(self,X,threshold = 0.5):
         pred_table = self.predict_table(X,threshold)
@@ -195,14 +147,74 @@ class ModelEvaluator:
         df = self.tansho.copy()
         df = df.merge(pred_table,left_index = True, right_index=True, how='right')
         money += df[df['win'] == df['馬番']]['return'].sum()
-        return n_bets,money
+        return_rate = (n_bets * 100 + money)/(n_bets * 100)
+        return n_bets,return_rate
 
-class ShutubaTable:
+    def tansho_return_proper(self,X,threshold = 0.5):
+        pred_table = self.predict_table(X,threshold)
+        n_bets = len(pred_table)
+
+        df = self.tansho.copy()
+        df = df.merge(pred_table,left_index = True, right_index=True, how='right')
+        return_rate = len(df.query('win == 馬番'))/(100/df['return'].sum())
+
+        return n_bets,return_rate
+
+class DataProcessor:
     def __init__(self):
-        self.shutuba_tables = pd.DataFrame()
-        self.shutuba_tables_p = pd.DataFrame()
-        self.shutuba_tables_h = pd.DataFrame() # horse_resultsをmergeしたもの
-        self.shutuba_tables_pe = pd.DataFrame() # Pedsをmergeしたもの
+        self.data = pd.DataFrame() # raw data
+        self.data_p = pd.DataFrame() # after 
+        self.data_h = pd.DataFrame() # after merging horse results
+        self.data_pe = pd.DataFrame() # after merging peds
+        self.data_c = pd.DataFrame() # process categorycal
+
+    def merge_horse_results(self,horse_results,n_samples_list = [5,9,'all']):
+        self.data_h = self.data_p.copy()
+        for n_samples in n_samples_list:
+            self.data_h = merge(self.data_h,horse_results,n_samples)
+
+    def merge_peds(self,peds):
+        self.data_pe = self.data_h.merge(peds,left_on = 'horse_id', right_index=True, how='left')
+        self.no_peds = self.data_pe[self.data_pe['peds_0'].isnull()]['horse_id'].unique()
+        if len(self.no_peds) > 0:
+            print('no peds, please scrape peds')
+            print(self.no_peds)
+    
+    def process_categorycal(self,le_horse,le_jockey,results_m):
+        df = self.data_pe.copy()
+        #Label encoding for horse_id, jockey_id
+        mask_horse = df['horse_id'].isin(le_horse.classes_)
+        new_horse_id = df['horse_id'].mask(mask_horse).dropna().unique()
+        le_horse.classes_ = np.concatenate([le_horse.classes_,new_horse_id])
+        df['horse_id'] = le_horse.transform(df['horse_id'])
+
+        mask_jockey = df['jockey_id'].isin(le_jockey.classes_)
+        new_jockey_id = df['jockey_id'].mask(mask_jockey).dropna().unique()
+        le_jockey.classes_ = np.concatenate([le_jockey.classes_,new_jockey_id])
+        df['jockey_id'] = le_jockey.transform(df['jockey_id'])
+
+        #horse_id, jockey_idをpandasのcategory型に変換
+        df['horse_id'] = df['horse_id'].astype('category')
+        df['jockey_id'] = df['jockey_id'].astype('category')
+
+        #列を一定にするため
+        #pandasのcategory型にしてからダミー変数化
+        weathers = results_m['weather'].unique()
+        race_types = results_m['race_type'].unique()
+        ground_states = results_m['ground_state'].unique()
+        sexes = results_m['性'].unique()
+
+        df['weather'] = pd.Categorical(df['weather'],weathers)
+        df['race_type'] = pd.Categorical(df['race_type'],race_types)
+        df['ground_state'] = pd.Categorical(df['ground_state'],ground_states)
+        df['性'] = pd.Categorical(df['性'],sexes)
+
+        df = pd.get_dummies(df,columns= ['weather', 'race_type', 'ground_state', '性'])
+        self.data_c = df
+
+class ShutubaTable(DataProcessor):
+    def __init__(self):
+        super(ShutubaTable,self).__init__()
 
     def scrape_shutuba_table(self,race_id_list,date):
         for race_id in tqdm(race_id_list):
@@ -246,36 +258,78 @@ class ShutubaTable:
             df['jockey_id'] = jockey_id_list
 
             df.index = [race_id] * len(df)
-            self.shutuba_tables = self.shutuba_tables.append(df)
+
+            df = df[df['印']!= '除外']
+            self.data = self.data.append(df)
             time.sleep(1)
     
     def preprocessing(self):
-        df = self.shutuba_tables.copy()
+        df = self.data.copy()
+
+        #convert to int
+        df[['枠', '馬番', '斤量']] = df[['枠', '馬番', '斤量']].astype(int)
 
         #性齢を性と年齢に分割
         df['性']= df['性齢'].map(lambda x: str(x)[0])
         df['年齢']= df['性齢'].map(lambda x: str(x)[1:]).astype(int)
         
         # #馬体重を体重と体重変化に分割
-        df['体重']= df['馬体重(増減)'].str.split('(').str[0].astype(int)
-        df['体重変化']= df['馬体重(増減)'].str.split('(').str[1].str.split(')').str[0].astype(int)
+        try:
+            df['体重']= df['馬体重(増減)'].str.split('(').str[0].astype(int)
+            df['体重変化']= df['馬体重(増減)'].str.split('(').str[1].str.split(')').str[0].astype(int)
+        except:
+            print('something error')
         
         df['date'] = pd.to_datetime(df['date'])
         
-        #いらない列を削除
-        df = df[['枠', '馬番', '性齢', '斤量','course_len','weather','race_type',
+        df = df[['枠', '馬番', '斤量','course_len','weather','race_type',
         'ground_state', 'date', 'horse_id', 'jockey_id','性', '年齢', '体重', '体重変化']]
         
-        self.shutuba_tables_p = df.rename(columns={'枠': '枠番'})
+        self.data_p = df.rename(columns={'枠': '枠番'})
 
+class Results(DataProcessor):
+    def __init__(self,results):
+        super(Results,self).__init__()
+        self.data = results
 
-    def merge_horse_results(self,horse_results,n_samples_list = [5,9,'all']):
-        self.shutuba_tables_h = self.shutuba_tables_p.copy()
-        for n_samples in n_samples_list:
-            self.shutuba_tables_h = merge(self.shutuba_tables_h,horse_results,n_samples)
+    def preprocessing(self):
+        df = self.data.copy()
+        # 着順に数字以外の文字列が含まれているものを取り除く
+        df = df[~(df['着順'].astype(str).str.contains('\D'))]
+        df['着順']= df['着順'].astype(int)
+        df['rank'] = df['着順'].map(lambda x: 1 if x < 4 else 0)
 
-    def merge_peds(self,peds):
-        self.shutuba_tables_pe = self.shutuba_tables_h.merge(peds,left_on = 'horse_id', right_index=True, how='left')
-        self.no_peds = self.shutuba_tables_pe[self.shutuba_tables_pe['peds_0'].isnull()]['horse_id'].unique()
-        if len(self.no_peds) > 0:
-            print('no peds, please scrape peds')
+        #性齢を性と年齢に分割
+        df['性']= df['性齢'].map(lambda x: str(x)[0])
+        df['年齢']= df['性齢'].map(lambda x: str(x)[1:]).astype(int)
+        
+        # #馬体重を体重と体重変化に分割
+        df['体重']= df['馬体重'].str.split('(').str[0].astype(int)
+        df['体重変化']= df['馬体重'].str.split('(').str[1].str.split(')').str[0].astype(int)
+        
+        #データをfloat型に変換
+        df['単勝']= df['単勝'].astype(float)
+        
+        #いらない列を削除
+        df = df.drop(['タイム', '着差', '調教師', '性齢', '馬体重','馬名', '騎手', '単勝', '着順', '人気'], axis=1)
+        
+        df['date'] = pd.to_datetime(df['date'], format='%Y年%m月%d日')
+        
+        self.data_p = df
+
+    def process_categorycal(self):
+        self.le_horse = LabelEncoder().fit(self.data_pe['horse_id'])
+        self.le_jockey = LabelEncoder().fit(self.data_pe['jockey_id'])
+        super().process_categorycal(self.le_horse,self.le_jockey,self.data_pe)
+
+class Peds:
+    def __init__(self,peds):
+        self.peds = peds
+        self.peds_e = pd.DataFrame() # after label encoding and transforming into category
+
+    def encode(self):
+        df = self.peds.copy()
+        for column in df.columns:
+            df[column] = LabelEncoder().fit_transform(df[column].fillna('Na'))
+        self.peds_e = df.astype('category')
+
